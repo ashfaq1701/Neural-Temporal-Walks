@@ -12,6 +12,7 @@ assert(args.cpu_cores >= -1)
 set_random_seed(args.seed)
 
 device = torch.device('cuda:{}'.format(args.gpu)) if torch.cuda.is_available() else torch.device('cpu')
+print(f'Will use device: {device}')
 
 g_df = pd.read_csv('./data/ml_{}.csv'.format(args.data))
 if args.data_usage < 1:
