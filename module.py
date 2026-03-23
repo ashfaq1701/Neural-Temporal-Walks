@@ -186,120 +186,93 @@ class NeurTWs(torch.nn.Module):
         return walk_encoder
 
     def contrast(self, src_idx_l, tgt_idx_l, bgd_idx_l, cut_time_l, e_idx_l=None):
-        scores = 0.0
-
-        subgraph_src = self.grab_subgraph(src_idx_l, cut_time_l, e_idx_l=e_idx_l)
-        subgraph_tgt = self.grab_subgraph(tgt_idx_l, cut_time_l, e_idx_l=e_idx_l)
-
-        self.position_encoder.init_internal_data(src_idx_l, tgt_idx_l, cut_time_l, subgraph_src, subgraph_tgt)
-
-        subgraph_src = self.subgraph_tree2walk(src_idx_l, cut_time_l, subgraph_src)
-        subgraph_tgt = self.subgraph_tree2walk(tgt_idx_l, cut_time_l, subgraph_tgt)
-
-        src_embed = self.forward_msg(src_idx_l, cut_time_l, subgraph_src)
-        tgt_embed = self.forward_msg(tgt_idx_l, cut_time_l, subgraph_tgt)
-
-        if self.walk_mutual:
-            src_embed, tgt_embed = self.tune_msg(src_embed, tgt_embed)
-
-        pos_score, _ = self.affinity_score(src_embed, tgt_embed)
-        pos_score.squeeze(dim=-1)
-        pos_score = self.f(pos_score.sigmoid())
-        scores += pos_score
-        size = len(src_idx_l)
-        start_idx = 0
-
-        for i in range(self.negatives):
-            bgd_idx_cut = bgd_idx_l[start_idx : (i+1) * size]
-            subgraph_src = self.grab_subgraph(src_idx_l, cut_time_l, e_idx_l=e_idx_l)
-            subgraph_bgd = self.grab_subgraph(bgd_idx_cut, cut_time_l, e_idx_l=None)
-
-            self.position_encoder.init_internal_data(src_idx_l, bgd_idx_cut, cut_time_l, subgraph_src, subgraph_bgd)
-            subgraph_bgd = self.subgraph_tree2walk(bgd_idx_cut, cut_time_l, subgraph_bgd)
-            bgd_embed = self.forward_msg(bgd_idx_cut, cut_time_l, subgraph_bgd)
-
-            if self.walk_mutual:
-                src_embed, bgd_embed = self.tune_msg(src_embed, bgd_embed)
-
-            neg_score, _ = self.affinity_score(src_embed, bgd_embed)
-            neg_score = self.f(neg_score.sigmoid())
-            neg_score.squeeze(dim=-1)
-            scores += neg_score
-            start_idx = (i+1) * size
-
-        loss = -torch.log(pos_score / scores)
-        return loss.mean()
-
-    def contrast_with_timing(self, src_idx_l, tgt_idx_l, bgd_idx_l, cut_time_l, e_idx_l=None):
         timing = {'walk': 0.0, 'position': 0.0, 'model': 0.0}
 
+        scores = 0.0
+
+        # ---- Walk/Subgraph ----
         t0 = perf_counter()
         subgraph_src = self.grab_subgraph(src_idx_l, cut_time_l, e_idx_l=e_idx_l)
         subgraph_tgt = self.grab_subgraph(tgt_idx_l, cut_time_l, e_idx_l=e_idx_l)
         timing['walk'] += perf_counter() - t0
 
+        # ---- Position init ----
         t0 = perf_counter()
         self.position_encoder.init_internal_data(src_idx_l, tgt_idx_l, cut_time_l, subgraph_src, subgraph_tgt)
         timing['position'] += perf_counter() - t0
 
+        # ---- Tree → walk ----
         t0 = perf_counter()
         subgraph_src = self.subgraph_tree2walk(src_idx_l, cut_time_l, subgraph_src)
         subgraph_tgt = self.subgraph_tree2walk(tgt_idx_l, cut_time_l, subgraph_tgt)
         timing['walk'] += perf_counter() - t0
 
-        src_embed, forward_timing = self.forward_msg_timed(src_idx_l, cut_time_l, subgraph_src)
-        tgt_embed, forward_timing_tgt = self.forward_msg_timed(tgt_idx_l, cut_time_l, subgraph_tgt)
-        timing['position'] += forward_timing['position'] + forward_timing_tgt['position']
-        timing['model'] += forward_timing['model'] + forward_timing_tgt['model']
+        # ---- Forward ----
+        src_embed, t_src = self.forward_msg(src_idx_l, cut_time_l, subgraph_src)
+        tgt_embed, t_tgt = self.forward_msg(tgt_idx_l, cut_time_l, subgraph_tgt)
 
+        timing['position'] += t_src['position'] + t_tgt['position']
+        timing['model'] += t_src['model'] + t_tgt['model']
+
+        # ---- Mutual (optional) ----
         if self.walk_mutual:
             t0 = perf_counter()
             src_embed, tgt_embed = self.tune_msg(src_embed, tgt_embed)
             timing['model'] += perf_counter() - t0
 
+        # ---- Positive score ----
         t0 = perf_counter()
         pos_score, _ = self.affinity_score(src_embed, tgt_embed)
         pos_score = self.f(pos_score.sigmoid())
-        scores = pos_score
+        scores = scores + pos_score
         timing['model'] += perf_counter() - t0
 
         size = len(src_idx_l)
         start_idx = 0
 
+        # ---- Negatives ----
         for i in range(self.negatives):
             bgd_idx_cut = bgd_idx_l[start_idx:(i + 1) * size]
 
+            # Walk
             t0 = perf_counter()
             subgraph_src = self.grab_subgraph(src_idx_l, cut_time_l, e_idx_l=e_idx_l)
             subgraph_bgd = self.grab_subgraph(bgd_idx_cut, cut_time_l, e_idx_l=None)
             timing['walk'] += perf_counter() - t0
 
+            # Position init
             t0 = perf_counter()
             self.position_encoder.init_internal_data(src_idx_l, bgd_idx_cut, cut_time_l, subgraph_src, subgraph_bgd)
             timing['position'] += perf_counter() - t0
 
+            # Tree → walk
             t0 = perf_counter()
             subgraph_bgd = self.subgraph_tree2walk(bgd_idx_cut, cut_time_l, subgraph_bgd)
             timing['walk'] += perf_counter() - t0
 
-            bgd_embed, forward_timing_bgd = self.forward_msg_timed(bgd_idx_cut, cut_time_l, subgraph_bgd)
-            timing['position'] += forward_timing_bgd['position']
-            timing['model'] += forward_timing_bgd['model']
+            # Forward
+            bgd_embed, t_bgd = self.forward_msg(bgd_idx_cut, cut_time_l, subgraph_bgd)
+            timing['position'] += t_bgd['position']
+            timing['model'] += t_bgd['model']
 
+            # Mutual (optional)
             if self.walk_mutual:
                 t0 = perf_counter()
                 src_embed, bgd_embed = self.tune_msg(src_embed, bgd_embed)
                 timing['model'] += perf_counter() - t0
 
+            # Score
             t0 = perf_counter()
             neg_score, _ = self.affinity_score(src_embed, bgd_embed)
             neg_score = self.f(neg_score.sigmoid())
-            scores += neg_score
+            scores = scores + neg_score
             timing['model'] += perf_counter() - t0
 
             start_idx = (i + 1) * size
 
+        # ---- Loss ----
         loss = -torch.log(pos_score / scores)
+
         return loss.mean(), timing
 
     def inference(self, src_idx_l, tgt_idx_l, bgd_idx_l, cut_time_l, e_idx_l=None):
@@ -312,8 +285,8 @@ class NeurTWs(torch.nn.Module):
         subgraph_src = self.subgraph_tree2walk(src_idx_l, cut_time_l, subgraph_src)
         subgraph_tgt = self.subgraph_tree2walk(tgt_idx_l, cut_time_l, subgraph_tgt)
 
-        src_embed = self.forward_msg(src_idx_l, cut_time_l, subgraph_src)
-        tgt_embed = self.forward_msg(tgt_idx_l, cut_time_l, subgraph_tgt)
+        src_embed, _ = self.forward_msg(src_idx_l, cut_time_l, subgraph_src)
+        tgt_embed, _ = self.forward_msg(tgt_idx_l, cut_time_l, subgraph_tgt)
 
         if self.walk_mutual:
             src_embed, tgt_embed = self.tune_msg(src_embed, tgt_embed)
@@ -327,7 +300,7 @@ class NeurTWs(torch.nn.Module):
         self.position_encoder.init_internal_data(src_idx_l, bgd_idx_l, cut_time_l, subgraph_src, subgraph_bgd)
 
         subgraph_bgd = self.subgraph_tree2walk(bgd_idx_l, cut_time_l, subgraph_bgd)
-        bgd_embed = self.forward_msg(bgd_idx_l, cut_time_l, subgraph_bgd)
+        bgd_embed, _ = self.forward_msg(bgd_idx_l, cut_time_l, subgraph_bgd)
 
         if self.walk_mutual:
             src_embed, bgd_embed = self.tune_msg(src_embed, bgd_embed)
@@ -361,33 +334,27 @@ class NeurTWs(torch.nn.Module):
         return record_matrix
 
     def forward_msg(self, src_idx_l, cut_time_l, subgraph_src):
-        node_records, eidx_records, t_records = subgraph_src
-        hidden_embeddings, masks = self.init_hidden_embeddings(src_idx_l, node_records)
-        edge_features = self.retrieve_edge_features(eidx_records)
-        position_features = self.retrieve_position_features(src_idx_l, node_records, cut_time_l, t_records)
-
-        t_records_th = torch.from_numpy(t_records).float().to(self.n_feat_th.device)
-        final_node_embeddings = self.forward_msg_walk(hidden_embeddings, edge_features,
-                                                      position_features, t_records_th, None)
-        return final_node_embeddings
-
-    def forward_msg_timed(self, src_idx_l, cut_time_l, subgraph_src):
         timing = {'position': 0.0, 'model': 0.0}
+
         node_records, eidx_records, t_records = subgraph_src
 
+        # --- embeddings + edge ---
         t0 = perf_counter()
-        hidden_embeddings, _ = self.init_hidden_embeddings(src_idx_l, node_records)
+        hidden_embeddings, masks = self.init_hidden_embeddings(src_idx_l, node_records)
         edge_features = self.retrieve_edge_features(eidx_records)
         timing['model'] += perf_counter() - t0
 
+        # --- position encoding ---
         t0 = perf_counter()
         position_features = self.retrieve_position_features(src_idx_l, node_records, cut_time_l, t_records)
         timing['position'] += perf_counter() - t0
 
+        # --- forward ---
         t0 = perf_counter()
         t_records_th = torch.from_numpy(t_records).float().to(self.n_feat_th.device)
-        final_node_embeddings = self.forward_msg_walk(hidden_embeddings, edge_features,
-                                                      position_features, t_records_th, None)
+        final_node_embeddings = self.forward_msg_walk(
+            hidden_embeddings, edge_features, position_features, t_records_th, None
+        )
         timing['model'] += perf_counter() - t0
 
         return final_node_embeddings, timing

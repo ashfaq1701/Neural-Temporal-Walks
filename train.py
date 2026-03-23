@@ -54,7 +54,7 @@ def train_val(train_val_data, model, mode, bs, epochs, optimizer, early_stopper,
             _, dst_l_fake = train_rand_sampler.sample(negatives * size)
             optimizer.zero_grad()
             model.train()
-            loss, timing = model.contrast_with_timing(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut)
+            loss, timing = model.contrast(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut)
             epoch_stats['walk'] += timing['walk']
             epoch_stats['position'] += timing['position']
             # Model timing includes forward/scoring plus backward and train-loop inference.
@@ -87,13 +87,13 @@ def train_val(train_val_data, model, mode, bs, epochs, optimizer, early_stopper,
             total_stats[key] += epoch_stats[key]
 
         logger.info(f"""
-Epoch {epoch} Timing:
-  Walk/Subgraph: {epoch_stats['walk']:.2f}s
-  Position Enc: {epoch_stats['position']:.2f}s
-  Model Ops:    {epoch_stats['model']:.2f}s
-  Eval:         {epoch_stats['eval']:.2f}s
-  Total:        {epoch_total:.2f}s
-""")
+            Epoch {epoch} Timing:
+            Walk/Subgraph: {epoch_stats['walk']:.2f}s
+            Position Enc: {epoch_stats['position']:.2f}s
+            Model Ops:    {epoch_stats['model']:.2f}s
+            Eval:         {epoch_stats['eval']:.2f}s
+            Total:        {epoch_total:.2f}s
+        """)
         logger.info('epoch: {}:'.format(epoch))
         logger.info('epoch mean loss: {}'.format(np.mean(m_loss)))
         logger.info('train auc: {}, val auc: {}'.format(np.mean(auc), val_auc))
@@ -116,9 +116,9 @@ Epoch {epoch} Timing:
             torch.save(model.state_dict(), model.get_checkpoint_path(epoch))
 
     logger.info(f"""
-Total Timing:
-  Walk/Subgraph: {total_stats['walk']:.2f}s
-  Position Enc: {total_stats['position']:.2f}s
-  Model Ops:    {total_stats['model']:.2f}s
-  Eval:         {total_stats['eval']:.2f}s
-""")
+        Total Timing:
+        Walk/Subgraph: {total_stats['walk']:.2f}s
+        Position Enc: {total_stats['position']:.2f}s
+        Model Ops:    {total_stats['model']:.2f}s
+        Eval:         {total_stats['eval']:.2f}s
+    """)
