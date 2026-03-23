@@ -6,6 +6,7 @@ from sklearn.metrics import average_precision_score
 from sklearn.metrics import roc_auc_score
 from eval import *
 import logging
+from time import perf_counter
 logging.getLogger('matplotlib.font_manager').disabled = True
 logging.getLogger('matplotlib.ticker').disabled = True
 
@@ -26,8 +27,16 @@ def train_val(train_val_data, model, mode, bs, epochs, optimizer, early_stopper,
     num_instance = len(train_src_l)
     num_batch = math.ceil(num_instance / bs)
     idx_list = np.arange(num_instance)
+    total_stats = {
+        'walk': 0.0,
+        'position': 0.0,
+        'model': 0.0,
+        'eval': 0.0
+    }
     for epoch in range(epochs):
         ap, auc, m_loss = [], [], []
+        epoch_stats = {k: 0.0 for k in total_stats}
+        epoch_start = perf_counter()
         np.random.shuffle(idx_list)
         logger.info('start {} epoch'.format(epoch))
         for k in tqdm(range(num_batch)):
@@ -45,23 +54,46 @@ def train_val(train_val_data, model, mode, bs, epochs, optimizer, early_stopper,
             _, dst_l_fake = train_rand_sampler.sample(negatives * size)
             optimizer.zero_grad()
             model.train()
-            loss = model.contrast(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut)
+            loss, timing = model.contrast_with_timing(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut)
+            epoch_stats['walk'] += timing['walk']
+            epoch_stats['position'] += timing['position']
+            # Model timing includes forward/scoring plus backward and train-loop inference.
+            epoch_stats['model'] += timing['model']
+            t0 = perf_counter()
             loss.backward()
             optimizer.step()
+            epoch_stats['model'] += perf_counter() - t0
 
             with torch.no_grad():
                 model.eval()
                 size = len(src_l_cut)
                 _, dst_l_fake = train_rand_sampler.sample(size)
+                t0 = perf_counter()
                 pos_prob, neg_prob = model.inference(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut)
+                epoch_stats['model'] += perf_counter() - t0
                 pred_score = np.concatenate([pos_prob.cpu().detach().numpy(), neg_prob.cpu().detach().numpy()])
                 true_label = np.concatenate([np.ones(size), np.zeros(size)])
                 ap.append(average_precision_score(true_label, pred_score))
                 m_loss.append(loss.item())
                 auc.append(roc_auc_score(true_label, pred_score))
 
+        t0 = perf_counter()
         val_ap, val_auc = eval_one_epoch(model, val_rand_sampler, val_src_l, val_dst_l,
                                          val_ts_l, val_label_l, val_e_idx_l)
+        epoch_stats['eval'] += perf_counter() - t0
+        epoch_total = perf_counter() - epoch_start
+
+        for key in total_stats:
+            total_stats[key] += epoch_stats[key]
+
+        logger.info(f"""
+Epoch {epoch} Timing:
+  Walk/Subgraph: {epoch_stats['walk']:.2f}s
+  Position Enc: {epoch_stats['position']:.2f}s
+  Model Ops:    {epoch_stats['model']:.2f}s
+  Eval:         {epoch_stats['eval']:.2f}s
+  Total:        {epoch_total:.2f}s
+""")
         logger.info('epoch: {}:'.format(epoch))
         logger.info('epoch mean loss: {}'.format(np.mean(m_loss)))
         logger.info('train auc: {}, val auc: {}'.format(np.mean(auc), val_auc))
@@ -83,4 +115,10 @@ def train_val(train_val_data, model, mode, bs, epochs, optimizer, early_stopper,
         else:
             torch.save(model.state_dict(), model.get_checkpoint_path(epoch))
 
-
+    logger.info(f"""
+Total Timing:
+  Walk/Subgraph: {total_stats['walk']:.2f}s
+  Position Enc: {total_stats['position']:.2f}s
+  Model Ops:    {total_stats['model']:.2f}s
+  Eval:         {total_stats['eval']:.2f}s
+""")
